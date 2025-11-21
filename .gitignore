@@ -31,6 +31,5 @@ Thumbs.db
 # Data files
 alarms_data.json
 
-alarm_clock.exe
-alarm_clock.exe
-alarm_clock.exe
+./alarm_clock.exe
+
