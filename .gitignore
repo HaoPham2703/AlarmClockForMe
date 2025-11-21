@@ -1,5 +1,6 @@
 # Virtual Environment
 venv/
+venv311/
 env/
 ENV/
 
@@ -30,3 +31,6 @@ Thumbs.db
 # Data files
 alarms_data.json
 
+alarm_clock.exe
+alarm_clock.exe
+alarm_clock.exe

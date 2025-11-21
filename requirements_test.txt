@@ -1,0 +1,6 @@
+# Requirements cho test chức năng nhận diện tư thế
+# Chỉ cần khi test tính năng pose detection
+
+opencv-python>=4.5.0
+mediapipe>=0.10.0
+
