@@ -9,11 +9,31 @@ import math
 import uuid
 import json
 import os
+import sys
+import platform
 try:
     import pyttsx3
     TTS_AVAILABLE = True
 except ImportError:
     TTS_AVAILABLE = False
+
+# System tray và autorun
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
+
+# Autorun cho Windows
+if platform.system() == 'Windows':
+    try:
+        import winreg
+        AUTORUN_AVAILABLE = True
+    except ImportError:
+        AUTORUN_AVAILABLE = False
+else:
+    AUTORUN_AVAILABLE = False
 
 class AnalogClock:
     def __init__(self, parent, size=200):
@@ -252,6 +272,11 @@ class AlarmClock:
         self.editing_alarm_id = None  # None nếu là tạo mới
         self.sleep_cycle_result = None  # Kết quả tính toán chu kỳ ngủ
         
+        # System tray
+        self.tray_icon = None
+        self.tray_thread = None
+        self.is_minimized_to_tray = False
+        
         # Load dữ liệu từ file
         self.load_alarms()
         
@@ -259,8 +284,15 @@ class AlarmClock:
         self.update_time()
         self.start_alarm_checker()
         
-        # Lưu dữ liệu khi đóng ứng dụng
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Setup system tray nếu có
+        if TRAY_AVAILABLE:
+            self.setup_system_tray()
+            # Xử lý minimize to tray
+            self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+            self.root.bind('<Unmap>', self.on_minimize)
+        else:
+            # Lưu dữ liệu khi đóng ứng dụng
+            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_ui(self):
         # Frame container chính
@@ -302,6 +334,13 @@ class AlarmClock:
             speak_button = ttk.Button(button_frame, text="🔊 Đọc Thời Gian", 
                                      command=self.read_current_time)
             speak_button.pack(side=tk.LEFT, padx=5)
+        
+        # Nút bật/tắt autorun (chỉ hiển thị trên Windows)
+        if AUTORUN_AVAILABLE:
+            self.autorun_button = ttk.Button(button_frame, text="⚙️ Tự động khởi động", 
+                                           command=self.toggle_autorun)
+            self.autorun_button.pack(side=tk.LEFT, padx=5)
+            self.update_autorun_button_text()
         
         # Frame danh sách báo thức với scroll
         list_frame = ttk.LabelFrame(self.list_view_frame, text="Danh sách báo thức", padding="10")
@@ -1250,6 +1289,229 @@ class AlarmClock:
             self.detail_time_label.config(text=current_time)
         
         self.root.after(1000, self.update_time)
+    
+    def create_tray_icon(self):
+        """Tạo icon cho system tray"""
+        # Tạo icon đơn giản với đồng hồ
+        width = height = 64
+        image = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(image)
+        
+        # Vẽ đồng hồ đơn giản
+        center = (width // 2, height // 2)
+        radius = 25
+        draw.ellipse([center[0] - radius, center[1] - radius, 
+                     center[0] + radius, center[1] + radius], 
+                    outline='black', width=3)
+        
+        # Vẽ kim giờ và phút
+        import math
+        hour_angle = math.radians(90)  # 12 giờ
+        minute_angle = math.radians(180)  # 6 giờ
+        
+        hour_end = (center[0] + int(radius * 0.4 * math.cos(hour_angle)),
+                   center[1] - int(radius * 0.4 * math.sin(hour_angle)))
+        minute_end = (center[0] + int(radius * 0.6 * math.cos(minute_angle)),
+                     center[1] - int(radius * 0.6 * math.sin(minute_angle)))
+        
+        draw.line([center, hour_end], fill='black', width=3)
+        draw.line([center, minute_end], fill='red', width=2)
+        
+        return image
+    
+    def setup_system_tray(self):
+        """Thiết lập system tray"""
+        if not TRAY_AVAILABLE:
+            return
+        
+        try:
+            # Tạo icon
+            icon_image = self.create_tray_icon()
+            
+            # Tạo menu với autorun status
+            def create_menu():
+                autorun_text = "Tắt tự động khởi động" if self.is_autorun_enabled() else "Bật tự động khởi động"
+                return pystray.Menu(
+                    pystray.MenuItem("Hiện cửa sổ", self.show_window, default=True),
+                    pystray.MenuItem(autorun_text, self.toggle_autorun_menu),
+                    pystray.MenuItem("Thoát", self.quit_application)
+                )
+            
+            # Tạo tray icon
+            self.tray_icon = pystray.Icon("Báo Thức", icon_image, "Báo Thức Python", create_menu())
+            
+            # Chạy tray icon trong thread riêng
+            def run_tray():
+                self.tray_icon.run()
+            
+            self.tray_thread = threading.Thread(target=run_tray, daemon=True)
+            self.tray_thread.start()
+        except Exception as e:
+            print(f"Không thể tạo system tray: {e}")
+    
+    def show_window(self, icon=None, item=None):
+        """Hiện lại cửa sổ từ system tray"""
+        self.root.after(0, self._show_window)
+    
+    def _show_window(self):
+        """Hiện cửa sổ (chạy trong main thread)"""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.is_minimized_to_tray = False
+    
+    def hide_to_tray(self):
+        """Ẩn cửa sổ vào system tray"""
+        if TRAY_AVAILABLE:
+            self.root.withdraw()
+            self.is_minimized_to_tray = True
+        else:
+            self.on_closing()
+    
+    def on_minimize(self, event):
+        """Xử lý khi minimize cửa sổ"""
+        if event.widget == self.root and TRAY_AVAILABLE:
+            # Ẩn vào tray thay vì minimize bình thường
+            self.root.after_idle(self.hide_to_tray)
+    
+    def quit_application(self, icon=None, item=None):
+        """Thoát ứng dụng"""
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.after(0, self.on_closing)
+    
+    def toggle_autorun_menu(self, icon=None, item=None):
+        """Toggle autorun từ menu"""
+        self.root.after(0, lambda: self.toggle_autorun(refresh_menu=True))
+    
+    def toggle_autorun(self, refresh_menu=False):
+        """Bật/tắt autorun"""
+        if not AUTORUN_AVAILABLE:
+            messagebox.showwarning("Không hỗ trợ", 
+                                 "Tính năng tự động khởi động chỉ hỗ trợ trên Windows")
+            return
+        
+        try:
+            if self.is_autorun_enabled():
+                self.disable_autorun()
+                if not refresh_menu:
+                    messagebox.showinfo("Thành công", "Đã tắt tự động khởi động")
+            else:
+                self.enable_autorun()
+                if not refresh_menu:
+                    messagebox.showinfo("Thành công", "Đã bật tự động khởi động")
+            self.update_autorun_button_text()
+            
+            # Refresh menu nếu có
+            if refresh_menu and self.tray_icon:
+                def create_menu():
+                    autorun_text = "Tắt tự động khởi động" if self.is_autorun_enabled() else "Bật tự động khởi động"
+                    return pystray.Menu(
+                        pystray.MenuItem("Hiện cửa sổ", self.show_window, default=True),
+                        pystray.MenuItem(autorun_text, self.toggle_autorun_menu),
+                        pystray.MenuItem("Thoát", self.quit_application)
+                    )
+                self.tray_icon.menu = create_menu()
+        except Exception as e:
+            if not refresh_menu:
+                messagebox.showerror("Lỗi", f"Không thể thay đổi cài đặt tự động khởi động: {e}")
+    
+    def update_autorun_button_text(self):
+        """Cập nhật text của nút autorun"""
+        if hasattr(self, 'autorun_button') and AUTORUN_AVAILABLE:
+            if self.is_autorun_enabled():
+                self.autorun_button.config(text="⚙️ Tắt tự động khởi động")
+            else:
+                self.autorun_button.config(text="⚙️ Bật tự động khởi động")
+    
+    def toggle_autorun(self):
+        """Bật/tắt autorun"""
+        if not AUTORUN_AVAILABLE:
+            messagebox.showwarning("Không hỗ trợ", 
+                                 "Tính năng tự động khởi động chỉ hỗ trợ trên Windows")
+            return
+        
+        try:
+            if self.is_autorun_enabled():
+                self.disable_autorun()
+                messagebox.showinfo("Thành công", "Đã tắt tự động khởi động")
+            else:
+                self.enable_autorun()
+                messagebox.showinfo("Thành công", "Đã bật tự động khởi động")
+            self.update_autorun_button_text()
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể thay đổi cài đặt tự động khởi động: {e}")
+    
+    def is_autorun_enabled(self):
+        """Kiểm tra xem autorun có được bật không"""
+        if not AUTORUN_AVAILABLE:
+            return False
+        
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_READ
+            )
+            try:
+                winreg.QueryValueEx(key, "BaoThuc")
+                winreg.CloseKey(key)
+                return True
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return False
+        except Exception:
+            return False
+    
+    def enable_autorun(self):
+        """Bật autorun"""
+        if not AUTORUN_AVAILABLE:
+            return False
+        
+        try:
+            # Lấy đường dẫn file thực thi
+            if getattr(sys, 'frozen', False):
+                # Nếu là file exe
+                exe_path = sys.executable
+            else:
+                # Nếu là script Python
+                script_path = os.path.abspath(__file__)
+                python_path = sys.executable
+                exe_path = f'"{python_path}" "{script_path}"'
+            
+            # Thêm vào registry
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE
+            )
+            winreg.SetValueEx(key, "BaoThuc", 0, winreg.REG_SZ, exe_path)
+            winreg.CloseKey(key)
+            return True
+        except Exception as e:
+            print(f"Lỗi khi bật autorun: {e}")
+            return False
+    
+    def disable_autorun(self):
+        """Tắt autorun"""
+        if not AUTORUN_AVAILABLE:
+            return False
+        
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE
+            )
+            try:
+                winreg.DeleteValue(key, "BaoThuc")
+            except FileNotFoundError:
+                pass  # Đã không có trong registry
+            winreg.CloseKey(key)
+            return True
+        except Exception as e:
+            print(f"Lỗi khi tắt autorun: {e}")
+            return False
 
 def main():
     root = tk.Tk()

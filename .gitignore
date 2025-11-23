@@ -33,3 +33,4 @@ alarms_data.json
 
 ./alarm_clock.exe
 
+dist/alarm_clock.exe
